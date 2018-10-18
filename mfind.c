@@ -26,13 +26,14 @@
 int parse_arguments(int argc, char **argv);
 void remove_leftover_dirs_from_list(void);
 void clean_up_and_exit(int exit_code);
-void create_threads_and_start_search(int num_of_threads);
+void thread_and_start_search(int num_of_threads);
 void initialize_list_and_thread_safety(void);
-void search_through_list(void);
+void *search_through_list(void *no);
 char *get_dir_from_list(void);
 void check_directory(char *dir);
 void check_if_searching_for_this_file(char *file_path);
 void add_dir_to_list(char *dir);
+void inc_global_err_count(void);
 
 /* Global list */
 list *dirs_to_check;
@@ -46,7 +47,10 @@ char *search_for_name;
 
 /* A global semaphore for the list protection */
 sem_t sem_list;
+sem_t sem_err;
 
+/*The gobal error count */
+unsigned int err_count = 0;
 
 
 int main(int argc, char **argv){
@@ -55,24 +59,44 @@ int main(int argc, char **argv){
 
 	int num_of_threads = parse_arguments(argc, argv);
 
-	create_threads_and_start_search(num_of_threads);
+	thread_and_start_search(num_of_threads);
 
-
-	clean_up_and_exit(EXIT_SUCCESS);
+	clean_up_and_exit(err_count);
 }
 
 /**
- * create_threads_and_start_search() -
+ * thread_and_start_search() -
  */
-void create_threads_and_start_search(int num_of_threads){
-	//TODO: create threads
-	search_through_list();
+void thread_and_start_search(int num_of_threads){
+	if(num_of_threads > 1){
+
+		pthread_t thread_id[num_of_threads-1];
+
+		for(int i = 0 ; i < num_of_threads-1; i++){
+			if(pthread_create(&thread_id[i], NULL, search_through_list, NULL)){
+				perror("pthread");
+			}
+		}
+
+		search_through_list(NULL);
+
+		for(int i = 0 ; i < num_of_threads-1; i++){
+			if(pthread_join(thread_id[i], NULL)){
+				perror("pthread");
+			}
+		}
+
+	}
+	else {
+		search_through_list(NULL);
+	}
+
 }
 
 /**
  * search_through_list() -
  */
-void search_through_list(void){
+void *search_through_list(void *no){ //TODO: Send in and return something?
 
 	char *dir;
 	unsigned long opened_dirs = 0;
@@ -84,6 +108,7 @@ void search_through_list(void){
 	}
 
 	fprintf(stdout, "Thread: %lu Reads: %lu\n", pthread_self(), opened_dirs);
+	return NULL;
 }
 
 /**
@@ -97,6 +122,7 @@ void check_directory(char *dir_path){
 
 	if (dir_stream == NULL) {
 		perror(dir_path);
+		inc_global_err_count();
 		return;
 	}
 
@@ -122,7 +148,7 @@ void check_directory(char *dir_path){
 }
 
 /**
- *
+ * check_if_searching_for_this_file() -
  */
 void check_if_searching_for_this_file(char *file_path){
 	struct stat file_info;
@@ -177,6 +203,18 @@ void initialize_list_and_thread_safety(void){
 		list_kill(dirs_to_check);
 		exit(EXIT_FAILURE);
 	}
+
+	if(sem_init(&sem_err, 0, 1) < 0){
+		perror("semaphore");
+
+		if(sem_destroy(&sem_list) < 0){
+			perror("Semaphore");
+		}
+
+		list_kill(dirs_to_check);
+		exit(EXIT_FAILURE);
+	}
+
 }
 
 
@@ -258,14 +296,11 @@ int parse_arguments(int argc, char **argv){
 	else{
 		for (int i = optind; i < argc-1; i++){
 			add_dir_to_list(argv[i]);
-			printf ("Argument %s\n", argv[i]);
 		}
 	}
 
 	//Get the filname which to search for.
 	search_for_name = argv[argc-1];
-	printf("searching for: %s\n", search_for_name);
-
 
 	return num_threads;
 }
@@ -281,10 +316,30 @@ void clean_up_and_exit(int exit_code){
 		perror("Semaphore");
 	}
 
+	if(sem_destroy(&sem_err) < 0){
+		perror("Semaphore");
+	}
+
 	//list
 	remove_leftover_dirs_from_list();
 	list_kill(dirs_to_check);
 	exit(exit_code);
+}
+
+/**
+ *
+ */
+void inc_global_err_count(void){
+	if(sem_wait(&sem_err) < 0){
+			fprintf(stderr, "Could not take semaphore!");
+	}
+
+	err_count++;
+
+	if(sem_post(&sem_err) < 0){
+		fprintf(stderr, "Could not release semaphore! Could not update " \
+				"error count");
+	}
 }
 
 /**
@@ -357,8 +412,6 @@ char *get_dir_from_list(void){
 
 		list_remove_element(first_item_pos, dirs_to_check);
 	}
-
-	//list_append(dir, dirs_to_check);
 
 	if(sem_post(&sem_list) < 0){
 		fprintf(stderr, "Could not release semaphore! Exiting to prevent " \
