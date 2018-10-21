@@ -22,25 +22,31 @@
 #include <libgen.h>
 #include <pthread.h>
 
+#define UNUSED(x) (void)(x)
+
 /* Prototypes */
 int parse_arguments(int argc, char **argv);
 void remove_leftover_dirs_from_list(void);
 void clean_up_and_exit(int exit_code);
 void thread_and_start_search(int num_of_threads);
-void initialize_list_and_thread_safety(void);
-void *search_through_list(void *no);
+void initialize_list(void);
+void *search_through_list(void *not_used __attribute__((unused)));
 char *get_dir_from_list(void);
 void check_directory(char *dir);
-void check_if_searching_for_this_file(char *file_path);
+void check_file(char *file_path);
 void add_dir_to_list(char *dir);
 void inc_global_err_count(void);
+void initialize_sem_active_threads(int threads);
+void initialize_sem_err_count(void);
+void add_argument_to_list_if_sym_link(char *arg);
+void check_input_argument(char *arg);
 
 /* Global list */
 list *dirs_to_check;
 
 /* The type to check for. 'f' for file, 'd' for directory and 'l' for link.
- * Set once, and only read afterwards. */
-char search_for_type = 'f';
+ * Set once, and only read afterwards. Default 'a' is for all types.*/
+char search_for_type = 'a';
 
 /* The filename which will be searched for. */
 char *search_for_name;
@@ -48,6 +54,7 @@ char *search_for_name;
 /* A global semaphore for the list protection */
 sem_t sem_list;
 sem_t sem_err;
+sem_t sem_active_threads;
 
 /*The gobal error count */
 unsigned int err_count = 0;
@@ -55,9 +62,13 @@ unsigned int err_count = 0;
 
 int main(int argc, char **argv){
 
-	initialize_list_and_thread_safety();
+	initialize_list();
+
+	initialize_sem_err_count();
 
 	int num_of_threads = parse_arguments(argc, argv);
+
+	initialize_sem_active_threads(num_of_threads);
 
 	thread_and_start_search(num_of_threads);
 
@@ -96,16 +107,39 @@ void thread_and_start_search(int num_of_threads){
 /**
  * search_through_list() -
  */
-void *search_through_list(void *no){ //TODO: Send in and return something?
+void *search_through_list(void *not_used __attribute__((unused))){
 
 	char *dir;
 	unsigned long opened_dirs = 0;
+	int active_threads = 0;
 
-	while((dir = get_dir_from_list()) != NULL){
-		check_directory(dir);
-		opened_dirs++;
-		free(dir);
-	}
+	do{
+		while((dir = get_dir_from_list()) != NULL){
+			//Release semaphore to show thread is active
+			if(sem_post(&sem_active_threads) < 0){
+				fprintf(stderr, "Could not release semaphore! Exiting to prevent " \
+						"dead-lock!");
+				clean_up_and_exit(EXIT_FAILURE);
+			}
+
+
+			check_directory(dir);
+			opened_dirs++;
+			free(dir);
+
+			if(sem_wait(&sem_active_threads) < 0){ //Take semaphore
+				fprintf(stderr, "Could not take semaphore!");
+				clean_up_and_exit(EXIT_FAILURE);
+			}
+		}
+
+		//Get sem value to see if thread should end
+		if(sem_getvalue(&sem_active_threads, &active_threads) != 0){
+			perror("sem_getvalue");
+			fprintf(stderr, "Thread could not get sem value. Killing thread!");
+			active_threads = 0;
+		}
+	}while(active_threads);
 
 	fprintf(stdout, "Thread: %lu Reads: %lu\n", pthread_self(), opened_dirs);
 	return NULL;
@@ -121,13 +155,15 @@ void check_directory(char *dir_path){
 	DIR *dir_stream = opendir(dir_path);
 
 	if (dir_stream == NULL) {
+		if(errno != EACCES){
+			inc_global_err_count();
+		}
 		perror(dir_path);
-		inc_global_err_count();
+
 		return;
 	}
 
 	while ((dir_pointer = readdir(dir_stream)) != NULL) {
-		//fprintf(stdout, "Found: %s\n", dir_pointer->d_name);
 
 		if((strcmp(dir_pointer->d_name,".") == 0) ||
 				(strcmp(dir_pointer->d_name, "..") == 0)){
@@ -138,7 +174,7 @@ void check_directory(char *dir_path){
 		strcat(file_path, "/");
 		strcat(file_path, dir_pointer->d_name);
 
-		check_if_searching_for_this_file(file_path);
+		check_file(file_path);
 	}
 
 	if(closedir(dir_stream) < 0){
@@ -148,9 +184,9 @@ void check_directory(char *dir_path){
 }
 
 /**
- * check_if_searching_for_this_file() -
+ * check_file() -
  */
-void check_if_searching_for_this_file(char *file_path){
+void check_file(char *file_path){
 	struct stat file_info;
 
 	if (lstat(file_path, &file_info) < 0) {
@@ -159,7 +195,7 @@ void check_if_searching_for_this_file(char *file_path){
 	}
 
 	if (S_ISDIR(file_info.st_mode)) { //Check if dir
-		if((search_for_type == 'd') &&
+		if(((search_for_type == 'd')||(search_for_type == 'a')) &&
 				(strcmp(basename(file_path),search_for_name) == 0)){
 			fprintf(stdout, "%s\n", file_path);
 		}
@@ -167,43 +203,57 @@ void check_if_searching_for_this_file(char *file_path){
 		add_dir_to_list(file_path);
 
 	}
-	else if(S_ISREG(file_info.st_mode)){ //Check if file
-		if((search_for_type == 'f') &&
+	if(S_ISREG(file_info.st_mode)){ //Check if file
+		if(((search_for_type == 'f')||(search_for_type == 'a')) &&
 				(strcmp(basename(file_path),search_for_name) == 0)){
 			fprintf(stdout, "%s\n", file_path);
 		}
 	}
-	else if(S_ISLNK(file_info.st_mode)){ //Check if symlink
-		if((search_for_type == 'l') &&
+	if(S_ISLNK(file_info.st_mode)){ //Check if symlink
+		if(((search_for_type == 'l')||(search_for_type == 'a')) &&
 				(strcmp(basename(file_path),search_for_name) == 0)){
 			fprintf(stdout, "%s\n", file_path);
 		}
 	}
-	else{ //Something else
-		//TODO: take care of this?
-	}
+	/* else{
+		Something else, we don't care about
+	}*/
 
 
 }
 
 /**
- * initialize_list_and_thread_safety() - Creates the list used for storing jobs
- * and initializes the semaphore needed for adding and removing from this list.
+ * initialize_sem_active_threads() -
  */
-void initialize_list_and_thread_safety(void){
-	//Create list
-	dirs_to_check = list_new();
-	if(dirs_to_check == NULL){
-		exit(EXIT_FAILURE);
-	}
-
+void initialize_sem_active_threads(int threads){
 	//Create semaphore for the list.
-	if(sem_init(&sem_list, 0, 1) < 0){
+
+	if(sem_init(&sem_active_threads, 0, threads) < 0){
 		perror("semaphore");
+
+		if(sem_destroy(&sem_list) < 0){
+			perror("Semaphore");
+		}
+
+		if(sem_destroy(&sem_err) < 0){
+			perror("Semaphore");
+		}
+
 		list_kill(dirs_to_check);
 		exit(EXIT_FAILURE);
 	}
 
+	//Take the active thread count down
+	for(int i = 0 ; i < threads ; i++){
+		if(sem_wait(&sem_active_threads) < 0){ //take semaphore
+			fprintf(stderr, "Could not take semaphore! Exiting to prevent " \
+					"further errors!");
+			clean_up_and_exit(EXIT_FAILURE);
+		}
+	}
+}
+
+void initialize_sem_err_count(void){
 	if(sem_init(&sem_err, 0, 1) < 0){
 		perror("semaphore");
 
@@ -214,7 +264,24 @@ void initialize_list_and_thread_safety(void){
 		list_kill(dirs_to_check);
 		exit(EXIT_FAILURE);
 	}
+}
 
+/**
+ * initialize_list() - Creates the list used for storing jobs
+ * and initializes the semaphore needed for adding and removing from this list.
+ */
+void initialize_list(void){
+	//Create list
+	dirs_to_check = list_new();
+	if(dirs_to_check == NULL){
+		exit(EXIT_FAILURE);
+	}
+
+	if(sem_init(&sem_list, 0, 1) < 0){
+		perror("semaphore");
+		list_kill(dirs_to_check);
+		exit(EXIT_FAILURE);
+	}
 }
 
 
@@ -237,18 +304,14 @@ int parse_arguments(int argc, char **argv){
 	while ((c = getopt (argc, argv, "t:p:")) != -1){
 		switch (c){
 			case 't':
-				printf("Got type %s\n", optarg);
 				if(strcmp(optarg, "f") == 0){
 					search_for_type = 'f';
-					printf("Searching for file!\n");
 				}
 				else if(strcmp(optarg, "d") == 0){
 					search_for_type = 'd';
-					printf("Searching for directory!\n");
 				}
 				else if(strcmp(optarg, "l") == 0){
 					search_for_type = 'l';
-					printf("Searching for link!\n");
 				}
 				else{
 					fprintf(stderr, "Wrong type, got: %s\n", optarg);
@@ -279,7 +342,7 @@ int parse_arguments(int argc, char **argv){
 
 
 				num_threads = (int)ret;
-				printf("Got threads %d\n", num_threads);
+				//printf("Got threads %d\n", num_threads);
 
 				break;
 			default:
@@ -288,21 +351,43 @@ int parse_arguments(int argc, char **argv){
 		}
 	}
 
+	//Get the filname which to search for.
+	search_for_name = argv[argc-1];
+
 	//Get the start directories. Must be at least one.
-	if(optind == argc){
+	if(optind == argc -1){
 		fprintf(stderr, "At least one start directory must be given!\n");
 		clean_up_and_exit(EXIT_FAILURE);
 	}
 	else{
 		for (int i = optind; i < argc-1; i++){
-			add_dir_to_list(argv[i]);
+			check_input_argument(argv[i]);
 		}
 	}
 
-	//Get the filname which to search for.
-	search_for_name = argv[argc-1];
+
 
 	return num_threads;
+}
+
+void check_input_argument(char *arg){
+	check_file(arg);
+
+	/* Normal directories are added by check_file */
+	add_argument_to_list_if_sym_link(arg);
+}
+
+void add_argument_to_list_if_sym_link(char *arg){
+	struct stat file_info;
+
+	if (lstat(arg, &file_info) < 0) {
+		perror(arg);
+		return;
+	}
+
+	if(S_ISLNK(file_info.st_mode)){ //Check if symlink
+		add_dir_to_list(arg);
+	}
 }
 
 /**
@@ -317,6 +402,10 @@ void clean_up_and_exit(int exit_code){
 	}
 
 	if(sem_destroy(&sem_err) < 0){
+		perror("Semaphore");
+	}
+
+	if(sem_destroy(&sem_active_threads) < 0){
 		perror("Semaphore");
 	}
 
