@@ -1,12 +1,18 @@
 /*
- * mfind.c
+ * mfind.c Is an implementation of the Linux command ''find'' but simplified.
+ * This program will seach for the given name in the given start directory. A
+ * file type can be given as an input, which will cause the program to only
+ * search for this file type. The current supported types are symbolic links,
+ * regular files and directories.
  *
  *  Created on: 16 Oct 2018
- *      Author: bram
+ *      Author: Bram Coenen (tfy15bcn)
  */
 
+/*Own includes*/
 #include "list.h"
 
+/*Standard C includes */
 #include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -22,9 +28,7 @@
 #include <libgen.h>
 #include <pthread.h>
 
-#define UNUSED(x) (void)(x)
-
-/* Prototypes */
+/* Function prototypes */
 int parse_arguments(int argc, char **argv);
 void remove_leftover_dirs_from_list(void);
 void clean_up_and_exit(int exit_code);
@@ -51,15 +55,17 @@ char search_for_type = 'a';
 /* The filename which will be searched for. */
 char *search_for_name;
 
-/* A global semaphore for the list protection */
+/*The gobal error count */
+unsigned int err_count = 0;
+
+/* The global semaphores for shared resource protection */
 sem_t sem_list;
 sem_t sem_err;
 sem_t sem_active_threads;
 
-/*The gobal error count */
-unsigned int err_count = 0;
-
-
+/**
+ * main() -
+ */
 int main(int argc, char **argv){
 
 	initialize_list();
@@ -117,8 +123,8 @@ void *search_through_list(void *not_used __attribute__((unused))){
 		while((dir = get_dir_from_list()) != NULL){
 			//Release semaphore to show thread is active
 			if(sem_post(&sem_active_threads) < 0){
-				fprintf(stderr, "Could not release semaphore! Exiting to prevent " \
-						"dead-lock!");
+				fprintf(stderr, "Could not release semaphore! " \
+						"Exiting to prevent dead-lock!");
 				clean_up_and_exit(EXIT_FAILURE);
 			}
 
@@ -396,7 +402,7 @@ void add_argument_to_list_if_sym_link(char *arg){
  * @param exit_code An exit which to exit with.
  */
 void clean_up_and_exit(int exit_code){
-	//semaphore
+	//Semaphores
 	if(sem_destroy(&sem_list) < 0){
 		perror("Semaphore");
 	}
@@ -409,14 +415,15 @@ void clean_up_and_exit(int exit_code){
 		perror("Semaphore");
 	}
 
-	//list
+	//List
 	remove_leftover_dirs_from_list();
 	list_kill(dirs_to_check);
 	exit(exit_code);
 }
 
 /**
- *
+ * inc_global_err_count() - Increases the global error count with one.
+ * Is thread safe due to the use of a semaphore.
  */
 void inc_global_err_count(void){
 	if(sem_wait(&sem_err) < 0){
