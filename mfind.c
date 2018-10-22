@@ -1,11 +1,11 @@
 /*
  * mfind.c Is an implementation of the Linux command ''find'' but simplified.
- * This program will seach for the given name in the given start directory. A
+ * This program will search for the given name in the given start directory. A
  * file type can be given as an input, which will cause the program to only
  * search for this file type. The current supported types are symbolic links,
  * regular files and directories.
  *
- *  Created on: 16 Oct 2018
+ *  Created on: 16 October 2018
  *      Author: Bram Coenen (tfy15bcn)
  */
 
@@ -64,7 +64,14 @@ sem_t sem_err;
 sem_t sem_active_threads;
 
 /**
- * main() -
+ * main() - The main function of the program which calls on the initialization
+ * function for the list, semaphores,... Then the search is started and
+ * afterwards all the semaphores and the list are destroyed. The global error
+ * count is passed as an exitcode.
+ *
+ * @param argc The number of arguments given to the program.
+ * @param argv An array of strings which are passed to the program.
+ * @return It never returns...
  */
 int main(int argc, char **argv){
 
@@ -82,7 +89,11 @@ int main(int argc, char **argv){
 }
 
 /**
- * thread_and_start_search() -
+ * thread_and_start_search() - Creates the number of desired threads and starts
+ * the search. Only if more than 1 thread is requested will additional threads
+ * be created.
+ *
+ * @param num_of_threads The number of threads requested by the user.
  */
 void thread_and_start_search(int num_of_threads){
 	if(num_of_threads > 1){
@@ -111,7 +122,17 @@ void thread_and_start_search(int num_of_threads){
 }
 
 /**
- * search_through_list() -
+ * search_through_list() - This function starts the search through the list. As
+ * long as the list in not empty, new threads will loop through this list. If
+ * the list is empty and there are no active threads, the function will return.
+ *
+ * This function is the start for the threads and this requires the function to
+ * take in a void * and return a void *. These are not used, however could be
+ * used to take in the name the program is searching for and for example return
+ * the amount of errors encountered.
+ *
+ * @param not_used Ignored
+ * @return Pointer to NULL.
  */
 void *search_through_list(void *not_used __attribute__((unused))){
 
@@ -152,7 +173,11 @@ void *search_through_list(void *not_used __attribute__((unused))){
 }
 
 /**
- * check_directory() -
+ * check_directory() - Check if the given directory contains a file with the
+ * name we are searching for. All the files in the directory are checked, but
+ * "." and ".." are ignored. If the
+ *
+ * @param dir_path The path to the directory which should be opened.
  */
 void check_directory(char *dir_path){
 	struct dirent *dir_pointer;
@@ -161,7 +186,7 @@ void check_directory(char *dir_path){
 	DIR *dir_stream = opendir(dir_path);
 
 	if (dir_stream == NULL) {
-		if(errno != EACCES){
+		if(errno != EACCES){ //FIXME: labres does not count this as an error...
 			inc_global_err_count();
 		}
 		perror(dir_path);
@@ -190,7 +215,14 @@ void check_directory(char *dir_path){
 }
 
 /**
- * check_file() -
+ * check_file() - Checks if the given file path goes to a file with the name
+ * the program is searching for. This also depends on which type of file the
+ * program is searching for. The file path is printed if the file matches what
+ * the program is searching for.
+ *
+ * If the path points to a directory, this directory will be added to the list.
+ *
+ * @param file_path The path to the file which should be checked.
  */
 void check_file(char *file_path){
 	struct stat file_info;
@@ -222,14 +254,17 @@ void check_file(char *file_path){
 		}
 	}
 	/* else{
-		Something else, we don't care about
+		Something else we don't care about
 	}*/
-
-
 }
 
 /**
- * initialize_sem_active_threads() -
+ * initialize_sem_active_threads() - Initialize the semaphore which can be used
+ * to examine how many threads in the program are actively searching through a
+ * directory. The semaphore shall be initialized to the number of threads the
+ * user has requested.
+ *
+ * @param threads The number which to initialize the semaphore with.
  */
 void initialize_sem_active_threads(int threads){
 	//Create semaphore for the list.
@@ -259,6 +294,11 @@ void initialize_sem_active_threads(int threads){
 	}
 }
 
+/**
+ * initialize_sem_err_count() - Initialize the semaphore protecting the error
+ * count to the value of 1. Because only one thread is allow to increment the
+ * variable at a time.
+ */
 void initialize_sem_err_count(void){
 	if(sem_init(&sem_err, 0, 1) < 0){
 		perror("semaphore");
@@ -371,11 +411,17 @@ int parse_arguments(int argc, char **argv){
 		}
 	}
 
-
-
 	return num_threads;
 }
 
+/**
+ * check_input_argument() - Calls on the function which see if the program is
+ * searching for the given file path. The path should be to a directory and
+ * should be added to the list by check_file. However symbolic links will also
+ * be added to the list by this function.
+ *
+ * @param arg Path to a directory or symbolic link.
+ */
 void check_input_argument(char *arg){
 	check_file(arg);
 
@@ -383,6 +429,13 @@ void check_input_argument(char *arg){
 	add_argument_to_list_if_sym_link(arg);
 }
 
+/**
+ * add_argument_to_list_if_sym_link() - If the given filpath goes to a symbolic
+ * link, this symbolic link will be added to the list of directories to examine.
+ *
+ * @param arg The path to a file which should be added to the list if it is a
+ * symbolic link.
+ */
 void add_argument_to_list_if_sym_link(char *arg){
 	struct stat file_info;
 
@@ -459,6 +512,7 @@ void remove_leftover_dirs_from_list(void){
 /**
  * add_dir_to_list() - Takes the list's semaphore and adds the given directory
  * to the list.
+ *
  * @param dir A directory to add to the list.
  */
 void add_dir_to_list(char *dir){
